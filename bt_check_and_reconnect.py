@@ -9,35 +9,45 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException 
 from subprocess import check_call, CalledProcessError
 
 import config
-
-from kython import *
-
+import logging
 import urllib.request
 from urllib.error import URLError
 from ssl import CertificateError
 import socket
+from wireless import Wireless
 
-_LOGGER_TAG = 'BTReloginHelper'
+logger = logging.getLogger('BTReloginHelper')
+
+BT_WIFI_SSID = "BTWi-fi"
+BT_WIFI_WITH_FON_SSID = "BTWifi-with-FON"
+
+BT_WIFIS = [BT_WIFI_SSID, BT_WIFI_WITH_FON_SSID]
 
 
-class ReloginHelper:
-    def __init__(self, username: str, password: str) -> None:
-        self.logger = logging.getLogger(_LOGGER_TAG)
-        self.config = config
-        self.username = username
-        self.password = password
+def get_wifi_name():
+    return str(Wireless().current())
 
-    def _login(self, driver: WebDriver) -> bool:
-        # https://stackoverflow.com/a/27417860/706389
-        BT_TIMEOUT = 5 # seconds
-        driver.implicitly_wait(BT_TIMEOUT)
-        driver.set_page_load_timeout(BT_TIMEOUT)
-        BT_PAGE = "https://www.btopenzone.com:8443/home"
-        driver.get(BT_PAGE)
-        # TODO huh, on VPN it shows 'you may have lost connection'. weird.
 
+def get_login_click_handler(wifi_ssid: str):
+
+    def login_click_bt(driver: WebDriver, username: str, password: str):
         if "You’re now logged in to BT Wi-fi" in driver.page_source:
-            self.logger.warning("Already logged... weird, doing nothing")
+            logger.warning("Already logged... weird, doing nothing")
+            return True
+
+        # this is the weird bug 'wifi access has expired'
+        if len(driver.find_elements_by_link_text("Buy more time")) > 0:
+            driver.find_element_by_link_text("Logout").click()
+            # TODO how to wait?
+
+        driver.find_element_by_id("username").send_keys(username)
+        driver.find_element_by_id("password-password").send_keys(password)
+        driver.find_element_by_class_name("lgnbtn").click()
+        return True
+
+    def login_click_with_fon(driver: WebDriver, username: str, password: str):
+        if "You’re now logged in to BT Wi-fi" in driver.page_source:
+            logger.warning("Already logged... weird, doing nothing")
             return True
 
         # this is the weird bug 'wifi access has expired'
@@ -52,10 +62,36 @@ class ReloginHelper:
         # so we have to find the one responsible for BT WiFI login
         login_form = driver.find_element_by_id('wifi_logon_form')
 
-        login_form.find_element_by_id("username").send_keys(self.username)
-        login_form.find_element_by_id("password").send_keys(self.password)
+        login_form.find_element_by_id("username").send_keys(username)
+        login_form.find_element_by_id("password").send_keys(password)
         login_form.find_element_by_id("loginbtn").click()
         return True
+
+    if wifi_ssid == BT_WIFI_SSID:
+        return login_click_bt
+    elif wifi_ssid == BT_WIFI_WITH_FON_SSID:
+        return login_click_with_fon
+    else:
+        raise ValueError(f"Sorry, {wifi_ssid} reconnect is not yet supported")
+
+
+class ReloginHelper:
+    def __init__(self, username: str, password: str) -> None:
+        self.username = username
+        self.password = password
+
+    def _login(self, driver: WebDriver) -> bool:
+        # https://stackoverflow.com/a/27417860/706389
+        BT_TIMEOUT = 5 # seconds
+        driver.implicitly_wait(BT_TIMEOUT)
+        driver.set_page_load_timeout(BT_TIMEOUT)
+        BT_PAGE = "https://www.btopenzone.com:8443/home"
+        driver.get(BT_PAGE)
+        # TODO huh, on VPN it shows 'you may have lost connection'. weird.
+
+        handler = get_login_click_handler(get_wifi_name())
+        return handler(driver, self.username, self.password)
+
 
     def _check_connected(self) -> bool:
         # testing for internet connection is hard..
@@ -69,22 +105,22 @@ class ReloginHelper:
             url = urllib.request.urlopen(TEST_URL, None, TIMEOUT_SECONDS)
             data = str(url.read(), 'utf-8')
             return "hasinternet" in data
-        except CertificateError as e:
-            self.logger.warning("Certificate error while retreiving test page...")
+        except CertificateError:
+            logger.info("Certificate error while retreiving test page...")
             return False
         except URLError as e:
             if 'timed out' in str(e.reason):
-                self.logger.info("Timeout while retreiving test page...")
+                logger.info("Timeout while retreiving test page...")
                 return False
             else:
                 raise e
-        except socket.timeout as e:
-            self.logger.info("Timeout while retreiving test page...")
+        except socket.timeout:
+            logger.info("Timeout while retreiving test page...")
             return False
 
     def _try_login_once(self) -> bool:
         driver = webdriver.PhantomJS(
-            executable_path=self.config.PHANTOMJS_BIN,
+            executable_path=config.PHANTOMJS_BIN,
             # sometimes returns empty page...
             # see https://stackoverflow.com/a/36159299/706389
             service_args=['--ignore-ssl-errors=true', '--ssl-protocol=TLSv1']
@@ -94,15 +130,15 @@ class ReloginHelper:
             try:
                 res = self._login(driver)
                 if res:
-                    self.logger.info("Logged in via PhantomJS")
+                    logger.info("Logged in via PhantomJS")
                 else:
-                    self.logger.warning("Failed to log in via PhantomJS")
+                    logger.warning("Failed to log in via PhantomJS")
                 return res
             except TimeoutException as e:
-                self.logger.warning("Timeout while interacting with page...")
+                logger.warning("Timeout while interacting with page...")
                 return False
             except CertificateError as e:
-                self.logger.warning("Certificate error while interacting with page...")
+                logger.warning("Certificate error while interacting with page...")
                 return False
         finally:
             driver.quit()
@@ -112,10 +148,10 @@ class ReloginHelper:
         while attempt < max_attempts:
             attempt += 1
             if self._check_connected():
-                self.logger.debug("Connected.. no action needed")
+                logger.debug("Connected.. no action needed")
                 return True
 
-            self.logger.info(f"Not connected, trying to login with webdriver, attempt {attempt}")
+            logger.info(f"Not connected, trying to login with webdriver, attempt {attempt}")
             res = self._try_login_once()
             if res:
                 return True
@@ -125,23 +161,23 @@ class ReloginHelper:
        Somethimes it just gets stuck and even wifi login page is not responding... in this case reconnecting wifi is to the rescue.
     """
     def reconnect_wifi(self):
-        btwifi = "BTWifi-with-FON"
+        btwifi = "BTWi-Fi"
         name = get_wifi_name()
         if not config.FORCE_RECONNECT and name != btwifi:
-            self.logger.warning(f"Current network is {name}, will not attempt reconnecting!")
+            logger.warning(f"Current network is {name}, will not attempt reconnecting!")
             return
 
-        self.logger.info(f"Disabling connection...")
+        logger.info(f"Disabling connection...")
         try:
             check_call(["nmcli", "con", "down", btwifi])
         except CalledProcessError as e:
-            self.logger.warning("Error while disabling connection...")
-            self.logger.exception(e)
-            self.logger.warning("Still will try to reconnect..")
-        self.logger.info(f"sleeping...")
+            logger.warning("Error while disabling connection...")
+            logger.exception(e)
+            logger.warning("Still will try to reconnect..")
+        logger.info(f"sleeping...")
         import time
         time.sleep(5)
-        self.logger.info(f"Enabling connection...")
+        logger.info(f"Enabling connection...")
         check_call(["nmcli", "con", "up", btwifi])
         # TODO sanity check that we are connected to BT wifi?
 
@@ -152,30 +188,29 @@ class ReloginHelper:
             attempt += 1
             logged: bool = False
             try:
-                self.logger.debug("Trying to connect via PhantomJS..")
+                logger.debug("Trying to connect via PhantomJS..")
                 logged = self.try_login()
             except URLError as e:
                 if 'Name or service not known' in str(e):
                     # usually means we have to reset wifi connection...
-                    self.logger.exception(e)
+                    logger.exception(e)
                     logged = False
                 elif 'Connection refused' in str(e):
                     # weird thing... probably have to reconnect to wifi as well..
-                    self.logger.exception(e)
+                    logger.exception(e)
                 else:
                     raise e
             except NoSuchElementException as e:
                 # TODO this is usually 'your wifi access has expired page', might be a good idea to click log out?
-                self.logger.exception(e)
+                logger.exception(e)
             if logged:
                 return
-            self.logger.warning(f"Could not log in via webdriver, attempt {attempt} to reconnect to wifi")
+            logger.warning(f"Could not log in via webdriver, attempt {attempt} to reconnect to wifi")
             self.reconnect_wifi()
-        self.logger.error("Could not recconnect. Sorry :(")
+        logger.error("Could not recconnect. Sorry :(")
 
 
 def main():
-    setup_logging()
 
     helper = ReloginHelper(config.USERNAME, config.PASSWORD)
     helper.fix_wifi_if_necessary()
