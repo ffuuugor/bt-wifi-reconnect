@@ -161,15 +161,14 @@ class ReloginHelper:
        Somethimes it just gets stuck and even wifi login page is not responding... in this case reconnecting wifi is to the rescue.
     """
     def reconnect_wifi(self):
-        btwifi = "BTWi-Fi"
-        name = get_wifi_name()
-        if not config.FORCE_RECONNECT and name != btwifi:
-            logger.warning(f"Current network is {name}, will not attempt reconnecting!")
-            return
+        current_wifi = get_wifi_name()
+
+        if current_wifi not in BT_WIFIS:
+            logger.warning(f"Sorry, only reconnecting to BT wifi-s are supported. Current network: {current_wifi}")
 
         logger.info(f"Disabling connection...")
         try:
-            check_call(["nmcli", "con", "down", btwifi])
+            check_call(["nmcli", "con", "down", current_wifi])
         except CalledProcessError as e:
             logger.warning("Error while disabling connection...")
             logger.exception(e)
@@ -178,7 +177,7 @@ class ReloginHelper:
         import time
         time.sleep(5)
         logger.info(f"Enabling connection...")
-        check_call(["nmcli", "con", "up", btwifi])
+        check_call(["nmcli", "con", "up", current_wifi])
         # TODO sanity check that we are connected to BT wifi?
 
     def fix_wifi_if_necessary(self):
